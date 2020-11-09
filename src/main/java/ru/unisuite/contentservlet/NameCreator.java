@@ -19,21 +19,24 @@ class NameCreator {
 		if (requestParameters.getWebMetaId() != null)
 			builder.append(String.format("wm=%s-", requestParameters.getWebMetaId()));
 
+		if (requestParameters.getWebMetaAlias() != null)
+			builder.append(String.format("wmAlias=%s-", requestParameters.getWebMetaAlias()));
+
 		if (requestParameters.getFileVersionId() != null)
 			builder.append(String.format("fw=%s-", requestParameters.getFileVersionId()));
 
 		if (requestParameters.getClientId() != null)
 			builder.append(String.format("cid=%s-", requestParameters.getClientId()));
-		
+
 		if (requestParameters.getEntryIdInPhotoalbum() != null)
 			builder.append(String.format("entInPhAl=%s-", requestParameters.getEntryIdInPhotoalbum()));
-		
+
 		if (requestParameters.getWidth() != null)
 			builder.append(String.format("width=%s-", requestParameters.getWidth()));
-		
+
 		if (requestParameters.getHeight() != null)
 			builder.append(String.format("height=%s-", requestParameters.getHeight()));
-		
+
 		return builder.toString();
 	}
 
@@ -57,10 +60,8 @@ class NameCreator {
 			byte[] digest = m.digest();
 			BigInteger bigInt = new BigInteger(1, digest);
 			return bigInt.toString(16);
-		} catch (NoSuchAlgorithmException e) {
-			throw new AssertionError();
-		} catch (UnsupportedEncodingException e) {
-			throw new AssertionError();
+		} catch (NoSuchAlgorithmException | UnsupportedEncodingException e) {
+			throw new AssertionError(e);
 		}
 	}
 

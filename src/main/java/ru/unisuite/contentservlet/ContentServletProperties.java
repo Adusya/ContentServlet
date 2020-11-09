@@ -4,35 +4,36 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
-import java.util.logging.Logger;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 
+import org.slf4j.LoggerFactory;
+import org.slf4j.Logger;
 import org.w3c.dom.Document;
 import org.xml.sax.SAXException;
 
 class ContentServletProperties {
 	public ContentServletProperties() throws ContentServletPropertiesException {
-		// initFromXml();
 		initFromProperties();
 	}
 
-	private static Logger logger = Logger.getLogger(ContentServletProperties.class.getName());
+	private static Logger logger = LoggerFactory.getLogger(ContentServletProperties.class.getName());
 
-	private final static String CONFIG_FILE_NAME = "ContentServletConfig.xml";
+	private final static String CONFIG_FILE_NAME = "content.properties";
 
 	private boolean useCache;
+	private String datasourceName;
+	private String cacheControl;
 
 	private void initFromProperties() throws ContentServletPropertiesException {
 
-		String filename = "content.properties";
-		try (InputStream input = this.getClass().getClassLoader().getResourceAsStream(filename);) {
+		try (InputStream input = this.getClass().getClassLoader().getResourceAsStream(CONFIG_FILE_NAME)) {
 
 			if (input == null) {
-				String errorMessage = "Unable to load " + filename;
-				logger.severe(errorMessage);
+				String errorMessage = "Unable to load " + CONFIG_FILE_NAME;
+				logger.error(errorMessage);
 				throw new ContentServletPropertiesException(errorMessage);
 			}
 
@@ -41,12 +42,17 @@ class ContentServletProperties {
 
 			Boolean useCache = Boolean.valueOf(prop.getProperty("ru.unisuite.contentservlet.usecache"));
 
+			String datasourceName = prop.getProperty("ru.unisuite.contentservlet.jndi.datasource.name");
+
+			String cacheControl = prop.getProperty("ru.unisuite.contentservlet.cachecontrol");
+
 			this.useCache = useCache;
+			this.datasourceName = datasourceName;
+			this.cacheControl = cacheControl;
 
 		} catch (IOException e) {
-			// e.printStackTrace();
-			String errorMessage = "Unable to load " + filename;
-			logger.severe(errorMessage);
+			String errorMessage = "Unable to load " + CONFIG_FILE_NAME;
+			logger.error(errorMessage, e);
 			throw new ContentServletPropertiesException(errorMessage, e);
 		}
 
@@ -57,7 +63,7 @@ class ContentServletProperties {
 		File xmlFile = new File(this.getClass().getClassLoader().getResource(CONFIG_FILE_NAME).getFile());
 		DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
 		DocumentBuilder db;
-		Document document = null;
+		Document document;
 		try {
 			db = dbf.newDocumentBuilder();
 			document = db.parse(xmlFile);
@@ -71,7 +77,7 @@ class ContentServletProperties {
 
 		try {
 			useCache = Boolean.parseBoolean(document.getDocumentElement()
-					.getElementsByTagName(ServletParamName.useCache).item(0).getTextContent().toString());
+					.getElementsByTagName(ServletParamName.useCache).item(0).getTextContent());
 		} catch (NullPointerException e) {
 			useCache = false;
 			// rootLogger.log(Level.WARNING, " useCache value not found. By default useCache
@@ -81,8 +87,16 @@ class ContentServletProperties {
 		this.useCache = useCache;
 	}
 
+	public String getDatasourceName() {
+		return datasourceName;
+	}
+
 	public boolean isUseCache() {
 		return useCache;
+	}
+
+	public String getCacheControl() {
+		return cacheControl;
 	}
 
 }

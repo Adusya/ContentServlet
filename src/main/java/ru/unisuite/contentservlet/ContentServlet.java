@@ -3,8 +3,6 @@ package ru.unisuite.contentservlet;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintWriter;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 import javax.servlet.ServletException;
 import javax.servlet.annotation.WebServlet;
@@ -12,82 +10,106 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import ru.unisuite.cache.Cache;
-import ru.unisuite.cache.CacheInstance;
-import ru.unisuite.cache.CacheStatist;
-import ru.unisuite.cache.cacheexception.CacheGetException;
-import ru.unisuite.cache.cacheexception.CacheStartFailedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import ru.unisuite.contentservlet.databasereader.DatabaseReaderException;
 import ru.unisuite.contentservlet.databasereader.DatabaseReaderNoDataException;
+import ru.unisuite.scf4j.Cache;
+import ru.unisuite.scf4j.CacheFactory;
+import ru.unisuite.scf4j.GeneralCacheFactory;
+import ru.unisuite.scf4j.exception.SCF4JCacheGetException;
+import ru.unisuite.scf4j.exception.SCF4JCacheStartFailedException;
 
-@WebServlet({"content/*", "content/secure/*"})
+@WebServlet("/*")//@WebServlet({ "/get/*", "/get/secure/*" })
 public class ContentServlet extends HttpServlet {
 
-	private ContentGetter contentGetter = new ContentGetter();
-	private CacheInstance cacheInstance;
+	private ContentGetter contentGetter;
+	private CacheFactory cacheFactory;
+	private Cache persistantCache;
 
 	private static final long serialVersionUID = 1L;
 
 	public static boolean USE_CACHE;
 
-	private Logger logger = Logger.getLogger(ContentServlet.class.getName());
+	private Logger logger = LoggerFactory.getLogger(ContentServlet.class.getName());
 
 	private final static String contentTypeHTML = "text/html; charset=UTF-8";
-	private final static String ContentDispositionText = "Content-Disposition";
+	private final static String contentDispositionText = "Content-Disposition";
+	private final static String cacheControlHeaderName = "Cache-Control";
+	
+	private final static String CACHE_CONFIG_FILE_NAME = "cache-config.xml";
+	
+	private int defaultQuality;
 
 	public void init() {
 
-		ContentServletProperties contentServletProperties = null;
+		ContentServletProperties contentServletProperties;
 		try {
 			contentServletProperties = new ContentServletProperties();
 		} catch (ContentServletPropertiesException e) {
 			throw new RuntimeException("Problems with ContentServlet config file. " + e.toString(), e);
 		}
 
-		USE_CACHE = contentServletProperties.isUseCache();
+		contentGetter = new ContentGetter(contentServletProperties);
+		
+		try {
+			defaultQuality = contentGetter.getDefaultImageQuality();
+		} catch (DatabaseReaderException | DatabaseReaderNoDataException e1) {
+			throw new RuntimeException("Can't read default image quality. " + e1.toString(), e1);
+		}
 
+		USE_CACHE = contentServletProperties.isUseCache();
+		
 		if (USE_CACHE) {
 			try {
-				cacheInstance = new CacheInstance("C:\\Users\\romanov\\Desktop\\cache\\cacheConfig.xml");
-			} catch (CacheStartFailedException e) {
-				logger.log(Level.SEVERE, "Cache didn't start. " + e.toString(), e);
+				cacheFactory = GeneralCacheFactory.getCacheFactory(this.getClass().getClassLoader().getResource(CACHE_CONFIG_FILE_NAME).getPath());
+			} catch (SCF4JCacheStartFailedException e) {
+				throw new RuntimeException("Problems with Cache config file. " + e.toString(), e);
 			}
+			persistantCache = cacheFactory.getCache();
 		}
 	}
 
 	protected void doGet(HttpServletRequest request, HttpServletResponse response) {
-
-		Cache cache = null;
-		if (USE_CACHE) {
-			cache = cacheInstance.getCache();
-			long downtime = 0L; // берется из бд
-			if (cache.isUp)
-				cache.applyDowntine(downtime);
-		}
 		
 		// Инициализация класса со значениями всех параметров
-		RequestParameters requestParameters = null;
+		RequestParameters requestParameters;
 		try {
-			requestParameters = new RequestParameters(request.getParameterMap());
+			requestParameters = new RequestParameters(request.getParameterMap(), defaultQuality);
+			logger.debug("HTTP request: " + requestParameters.toString());
 		} catch (NumberFormatException e) {
 
-			logger.log(Level.SEVERE, "Request parameters didn't initialised. " + e.toString(), e);
+			logger.error("Request parameters didn't initialised. " + e.toString(), e);
 			try {
 				response.sendError(HttpServletResponse.SC_BAD_REQUEST);
 			} catch (IOException e1) {
-				logger.log(Level.SEVERE, "Error did not show to client. " + e1.toString(), e);
+				logger.error("Error did not show to client. " + e1.toString(), e);
+			}
+			return;
+		}
+		
+		if (requestParameters.isEmpty()) {
+			try {
+				response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+				request.getServletContext().getRequestDispatcher("/help").forward(request, response);
+			} catch (ServletException | IOException e) {
+				logger.error("Servlet can't show /help page. " + e.getMessage(), e);
 			}
 			return;
 		}
 
 		// Задание Header
-		String respHeader = contentGetter.getHeader(request, requestParameters.getContentDisposition());
-		response.setHeader(ContentDispositionText, respHeader);
+		String respHeader = contentGetter.getContentDisposition(request, requestParameters.getContentDisposition());
+		response.setHeader(contentDispositionText, respHeader);
+		
+		String cacheControl = contentGetter.getCacheControl(requestParameters.getCacheControl());
+		response.setHeader(cacheControlHeaderName, cacheControl);
 
 		// Временно чтобы работало
 		Integer contentType = requestParameters.getContentType();
 		if (contentType == null) {
-			contentType = -1; 
+			contentType = -1;
 		}
 
 		switch (contentType) {
@@ -95,7 +117,7 @@ public class ContentServlet extends HttpServlet {
 
 			response.setContentType(contentTypeHTML);
 
-			String codeData = null;
+			String codeData;
 
 			try (PrintWriter printWriter = response.getWriter()) {
 
@@ -112,13 +134,13 @@ public class ContentServlet extends HttpServlet {
 
 					printWriter.println("<h3>Error</h3>");
 					printWriter.println("<p>" + e.getMessage() + "</p>");
-					logger.log(Level.SEVERE, "CodeData wasn't fetched. " + e.toString(), e);
+					logger.error("CodeData wasn't fetched. " + e.toString(), e);
 
 				} finally {
 					printWriter.println("</body></html>");
 				}
 			} catch (IOException e) {
-				logger.log(Level.SEVERE, "PrintWriter did not created. " + e.toString(), e);
+				logger.error("PrintWriter did not created. " + e.toString(), e);
 			}
 
 			break;
@@ -137,13 +159,13 @@ public class ContentServlet extends HttpServlet {
 
 					printWriter.println("<h3>Error</h3>");
 					printWriter.println("<p>" + e.getMessage() + "</p>");
-					logger.log(Level.SEVERE, "ListData wasn't fetched. " + e.toString(), e);
+					logger.error("ListData wasn't fetched. " + e.toString(), e);
 
 				} finally {
 					printWriter.println("</body></html>");
 				}
 			} catch (IOException e) {
-				logger.log(Level.SEVERE, "PrintWriter did not created. " + e.toString(), e);
+				logger.error("PrintWriter did not created. " + e.toString(), e);
 			}
 			break;
 		}
@@ -151,40 +173,49 @@ public class ContentServlet extends HttpServlet {
 
 			try (OutputStream os = response.getOutputStream()) {
 
-				contentGetter.getObject(requestParameters, os, response, cache);
+				contentGetter.getObject(requestParameters, os, response, persistantCache);
 
 				if (USE_CACHE) {
-					if (cache.isUp) {
+					if (persistantCache.connectionIsUp()) {
 
-						CacheStatist statist = cache.getStatistics();
-
-						System.out.println("cacheHits: " + statist.getCacheHits() + " cacheMisses: "
-								+ statist.getCacheMisses() + " Ratio: " + statist.getCacheHitRatio());
+						System.out.println(persistantCache.getStatistics());
 					}
 				}
-			} catch (CacheGetException | DatabaseReaderException | IOException e) {
-				logger.log(Level.SEVERE, "Object getting is failed. " + e.toString(), e);
+			} catch (SCF4JCacheGetException | DatabaseReaderException | IOException e) {
+
+				try {
+					response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+				} catch (IOException e1) {
+					logger.error(e1.toString(), e1);
+				}
+
+				logger.error("Object getting is failed. " + e.toString(), e);
+
+				return;
+
 			} catch (DatabaseReaderNoDataException e) {
-				
-				response.setStatus(HttpServletResponse.SC_NOT_FOUND); //Не работает, потом уточнить как лучше поступить. Возможно, стоит передвать response в getObject().
-				
-				logger.log(Level.SEVERE, e.toString(), e);
+
+				try {
+					response.sendError(HttpServletResponse.SC_NOT_FOUND);
+				} catch (IOException e1) {
+					logger.warn(e1.toString(), e1);
+				}
+
+				logger.error(e.toString(), e);
 				return;
 			}
 		}
 		}
-		
-//		cache.shutdown();
+
 	}
 
-	protected void doPost(HttpServletRequest request, HttpServletResponse response)
-			throws ServletException, IOException {
+	protected void doPost(HttpServletRequest request, HttpServletResponse response) {
 		doGet(request, response);
 	}
 
 	public void destroy() {
-		if (cacheInstance != null)
-			cacheInstance.close();
+		if (cacheFactory != null)
+			cacheFactory.close();
 	}
 
 }

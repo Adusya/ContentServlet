@@ -1,22 +1,21 @@
 package ru.unisuite.contentservlet.databasereader;
 
-import java.io.FileOutputStream;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.sql.Blob;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 import javax.naming.Context;
 import javax.naming.InitialContext;
@@ -24,73 +23,80 @@ import javax.naming.NamingException;
 import javax.servlet.http.HttpServletResponse;
 import javax.sql.DataSource;
 
-import ru.unisuite.cache.Cache;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import ru.unisuite.contentservlet.ContentServlet;
+import ru.unisuite.imageresizer.ImageResizer;
+import ru.unisuite.imageresizer.ImageResizerFactory;
+import ru.unisuite.scf4j.Cache;
 
 public class OracleDatabaseReader implements DatabaseReader {
-	
-	private final Logger logger = Logger.getLogger(OracleDatabaseReader.class.getName());
 
-	private static final String DATASOURCE_NAME = "jdbc/ds_basic";
-	
-	@Override
-	public DataSource getDataSource() { //Обрабатывать местно
+	public OracleDatabaseReader(String datasourceName) {
+		this.datasourceName = datasourceName;
+	}
+
+	private final Logger logger = LoggerFactory.getLogger(OracleDatabaseReader.class.getName());
+
+	private String datasourceName;
+
+	private static final ZoneId GMT = ZoneId.of("GMT");
+	private static final DateTimeFormatter LAST_MODIFIED_FORMATTER = DateTimeFormatter
+			.ofPattern("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).withZone(GMT);
+
+	private DataSource getDataSource() throws DatabaseReaderException {
 
 		Context initialContext = null;
 		try {
 			initialContext = new InitialContext();
-			DataSource dataSource = (DataSource) initialContext.lookup(DATASOURCE_NAME);
-			return dataSource;
-		} catch (NamingException e) {
-			logger.log(Level.SEVERE, e.toString(), e);
-			return null;
+			return (DataSource) initialContext.lookup(datasourceName);
+		} catch (Exception e) {
+			logger.error(e.toString(), e);
+			throw new DatabaseReaderException("Unable to lookup datasource by name", e);
 		} finally {
 			if (initialContext != null) {
 				try {
 					initialContext.close();
 				} catch (NamingException e) {
-					logger.log(Level.WARNING, "InitialContext wasn't closed. " + e.toString(), e);
+					logger.warn("InitialContext wasn't closed. " + e.toString(), e);
 				}
-
 			}
 		}
-
 	}
 
 	@Override
-	public String getCodeData(final int webMetaId) throws OracleDatabaseReaderException {
+	public String getCodeData(final int webMetaId) throws DatabaseReaderException {
 
 		final String getCodeDataSQL = "select wpms_cm_wp.get_ContentURL(cv.id_web_metaterm, null, 4) rStr from content_version_wp cv where cv.id_web_metaterm = ?";
-		
+
 		String codeData;
 
 		try (Connection connection = getDataSource().getConnection();
-				PreparedStatement preparedStatement = (PreparedStatement) connection.prepareStatement(getCodeDataSQL)) {
+				PreparedStatement preparedStatement = connection.prepareStatement(getCodeDataSQL)) {
 
-			setParameterInt(preparedStatement, 1, webMetaId);
+			preparedStatement.setObject(1, webMetaId);
 
-			try (ResultSet resultSet = (ResultSet) preparedStatement.executeQuery()) {
+			try (ResultSet resultSet = preparedStatement.executeQuery()) {
 				resultSet.next();
 				codeData = resultSet.getString(DatabaseReaderParamName.rstr);
 			}
-
 		} catch (SQLException e) {
-			throw new OracleDatabaseReaderException(e.getMessage(), e);
+			throw new DatabaseReaderException(e.getMessage(), e);
 		}
 		return codeData;
 	}
 
 	@Override
-	public void getResTestListData(PrintWriter printWriter) throws OracleDatabaseReaderException {
+	public void getResTestListData(PrintWriter printWriter) throws DatabaseReaderException {
 
 		final String getResTestListDataSQL = "select wpms_cm_wp.get_ContentURL(t.id_web_metaterm, null, 2) cnt from actual_content_version_wp t\n";
-		
+
 		String data;
 
 		try (Connection connection = getDataSource().getConnection();
-				PreparedStatement preparedStatement = (PreparedStatement) connection
-						.prepareStatement(getResTestListDataSQL);
-				ResultSet resultSet = (ResultSet) preparedStatement.executeQuery()) {
+				PreparedStatement preparedStatement = connection.prepareStatement(getResTestListDataSQL);
+				ResultSet resultSet = preparedStatement.executeQuery()) {
 
 			while (resultSet.next()) {
 				data = resultSet.getString(DatabaseReaderParamName.cnt);
@@ -98,202 +104,206 @@ public class OracleDatabaseReader implements DatabaseReader {
 					printWriter.println("<p>" + data + "</p>");
 				}
 			}
-
 		} catch (SQLException e) {
-			throw new OracleDatabaseReaderException(e.getMessage(), e);
+			throw new DatabaseReaderException(e.getMessage(), e);
 		}
 	}
-	
+
 	@Override
-	public void getBinaryDataByMetaId(DatabaseQueryParameters queryParameters, OutputStream osServlet,
-			HttpServletResponse response, Cache cache, String idInCache) throws OracleDatabaseReaderException, DatabaseReaderNoDataException {
-		
-		final String getBinaryDataByMetaIdSQL = "select data_binary, bsize, cntsecond_last_modified, filename, mime, extension from TABLE(cast(wpms_fp_wp.ImgScaleAsSet(Aid_web_metaterm => ?, AScaleWidth => ?, AScaleHeight => ?) as wpt_t_data_img_wp))";
+	public int getDefaultImageQuality() throws DatabaseReaderException, DatabaseReaderNoDataException {
+
+		final String getDefaultImageQualitySQL = "select 84 imagequality from dual";
 
 		try (Connection connection = getDataSource().getConnection();
-				PreparedStatement preparedStatement = (PreparedStatement) connection
-						.prepareStatement(getBinaryDataByMetaIdSQL)) {
+				PreparedStatement preparedStatement = connection.prepareStatement(getDefaultImageQualitySQL)) {
 
-			int i = 1;
-			
-			setParameterInt(preparedStatement, i++, queryParameters.getWebMetaId());
-			setParameterStr(preparedStatement, i++, queryParameters.getWidth());
-			setParameterStr(preparedStatement, i++, queryParameters.getHeight());
 			try (ResultSet resultSet = preparedStatement.executeQuery()) {
+
+				if (!resultSet.isBeforeFirst()) {
+					throw new DatabaseReaderNoDataException("Image quality value in DB is empty. ");
+				} else {
+					resultSet.next();
+					return resultSet.getInt(DatabaseReaderParamName.imageQuality);
+				}
+			}
+		} catch (SQLException e) {
+			throw new DatabaseReaderException(e.getMessage(), e);
+		}
+	}
+
+	@Override
+	public void getBinaryDataByMeta(DatabaseQueryParameters queryParameters, OutputStream osServlet,
+			HttpServletResponse response, Cache persistantCache, String idInCache)
+			throws DatabaseReaderException, DatabaseReaderNoDataException {
+
+		final String getBinaryDataByMetaSQL = "select data_binary, bsize, cntsecond_last_modified, filename, mime, extension from TABLE(cast(wpms_fp_wp.ImgScaleAsSet(Aid_web_metaterm => ?, AScaleWidth => ?, AScaleHeight => ?, A_alias => ?) as wpt_t_data_img_wp))";
+
+		try (Connection connection = getDataSource().getConnection();
+				PreparedStatement preparedStatement = connection.prepareStatement(getBinaryDataByMetaSQL)) {
+
+			Object[] parametersArray = { queryParameters.getWebMetaId(), null, null, queryParameters.getWebMetaAlias() };
+			
+			try (ResultSet resultSet = executeWithParameters(preparedStatement, parametersArray)) {
 
 				if (!resultSet.isBeforeFirst()) {
 					throw new DatabaseReaderNoDataException("No content found for these parameters. ");
 				} else {
-					fetchDataFromResultSet(resultSet, osServlet, response, cache, idInCache);
+					fetchDataFromResultSet(resultSet, osServlet, response, persistantCache, idInCache,
+							queryParameters.getWidth(), queryParameters.getHeight(), queryParameters.getQuality());
 				}
-
 			}
 		} catch (SQLException e) {
-			e.printStackTrace();
-			throw new OracleDatabaseReaderException(e.getMessage(), e);
+			throw new DatabaseReaderException(e.getMessage(), e);
 		}
-
 	}
 
 	@Override
 	public void getBinaryDataByFileVersionId(DatabaseQueryParameters queryParameters, OutputStream osServlet,
-			HttpServletResponse response, Cache cache, String idInCache) throws OracleDatabaseReaderException, DatabaseReaderNoDataException {
+			HttpServletResponse response, Cache persistantCache, String idInCache)
+			throws DatabaseReaderException, DatabaseReaderNoDataException {
 
 		final String getBinaryDataByFileVersionIdSQL = "select data_binary, bsize, cntsecond_last_modified, filename, mime, extension from TABLE(cast(wpms_cm_kis_wp.ImgVFScaleAsSet(Aid_version_file => ?, AScaleWidth => ?, AScaleHeight => ?) as wpt_t_data_img_wp))";
-		
+
 		try (Connection connection = getDataSource().getConnection();
-				PreparedStatement preparedStatement = (PreparedStatement) connection
-						.prepareStatement(getBinaryDataByFileVersionIdSQL)) {
+				PreparedStatement preparedStatement = connection.prepareStatement(getBinaryDataByFileVersionIdSQL)) {
 
-			int i = 1;
-			setParameterInt(preparedStatement, i++, queryParameters.getFileVersionId());
-			setParameterStr(preparedStatement, i++, queryParameters.getWidth());
-			setParameterStr(preparedStatement, i++, queryParameters.getHeight());
+			Object[] parametersArray = { queryParameters.getFileVersionId(), null, null };
+			
+			try (ResultSet resultSet = executeWithParameters(preparedStatement, parametersArray)) {
 
-			try (ResultSet resultSet = preparedStatement.executeQuery()) {
-				
 				if (!resultSet.isBeforeFirst()) {
 					throw new DatabaseReaderNoDataException("No content found for these parameters. ");
 				} else {
-					fetchDataFromResultSet(resultSet, osServlet, response, cache, idInCache);
+					fetchDataFromResultSet(resultSet, osServlet, response, persistantCache, idInCache,
+							queryParameters.getWidth(), queryParameters.getHeight(), queryParameters.getQuality());
 				}
-
 			}
 		} catch (SQLException e) {
-			throw new OracleDatabaseReaderException(e.getMessage(), e);
+			throw new DatabaseReaderException(e.getMessage(), e);
 		}
-
 	}
 
 	@Override
 	public void getBinaryDataByClientId(DatabaseQueryParameters queryParameters, OutputStream osServlet,
-			HttpServletResponse response, Cache cache, String idInCache) throws OracleDatabaseReaderException, DatabaseReaderNoDataException {
+			HttpServletResponse response, Cache persistantCache, String idInCache)
+			throws DatabaseReaderException, DatabaseReaderNoDataException {
 
 		final String getBinaryDataByClientIdSQL = "select data_binary, bsize, cntsecond_last_modified, filename, mime, extension from TABLE(cast(wpms_cm_kis_wp.PhotoScaleAsSet(Aid_e => ?, Aid_photo_album => ?, AScaleWidth => ?, AScaleHeight => ?) as wpt_t_data_img_wp))";
-		
+
 		try (Connection connection = getDataSource().getConnection();
-				PreparedStatement preparedStatement = (PreparedStatement) connection
-						.prepareStatement(getBinaryDataByClientIdSQL)) {
+				PreparedStatement preparedStatement = connection.prepareStatement(getBinaryDataByClientIdSQL)) {
 
-			int i = 1;
-			setParameterInt(preparedStatement, i++, queryParameters.getClientId());
-			setParameterInt(preparedStatement, i++, queryParameters.getEntryIdInPhotoalbum());
-			setParameterStr(preparedStatement, i++, queryParameters.getWidth());
-			setParameterStr(preparedStatement, i++, queryParameters.getHeight());
-
-			try (ResultSet resultSet = preparedStatement.executeQuery()) {
+			Object[] parametersArray = { queryParameters.getClientId(), queryParameters.getEntryIdInPhotoalbum(), null, null };
+			
+			try (ResultSet resultSet = executeWithParameters(preparedStatement, parametersArray)) {
 
 				if (!resultSet.isBeforeFirst()) {
 					throw new DatabaseReaderNoDataException("No content found for these parameters. ");
 				} else {
-					fetchDataFromResultSet(resultSet, osServlet, response, cache, idInCache);
+					fetchDataFromResultSet(resultSet, osServlet, response, persistantCache, idInCache,
+							queryParameters.getWidth(), queryParameters.getHeight(), queryParameters.getQuality());
 				}
-
 			}
 		} catch (SQLException e) {
-			throw new OracleDatabaseReaderException(e.getMessage(), e);
-		}
-
-	}
-
-	@Override
-	public void setParameterInt(PreparedStatement preparedStatement, int field, Integer value) throws SQLException {
-		if (value == null) {
-			preparedStatement.setNull(field, 0);
-		} else {
-			preparedStatement.setInt(field, value);
+			throw new DatabaseReaderException(e.getMessage(), e);
 		}
 	}
-
-	@Override
-	public void setParameterStr(PreparedStatement preparedStatement, int field, String value) throws SQLException {
-		if (value == null) {
-			preparedStatement.setNull(field, 0);
-		} else {
-			preparedStatement.setString(field, value);
+	
+	private ResultSet executeWithParameters(PreparedStatement preparedStatement, Object[] parametersArray) throws SQLException {
+		
+		for (int i = 0; i < parametersArray.length; i++) {
+			preparedStatement.setObject(i+1, parametersArray[i]);
 		}
+		return preparedStatement.executeQuery();
 	}
 
-	@Override
-	public void writeToStream(Blob blobData, OutputStream os) throws DatabaseReaderWriteToStreamException {
+	private void writeToStream(InputStream is, OutputStream os) throws DatabaseReaderWriteToStreamException {
 
 		int length;
 		int bufSize = 4096;
 		byte buffer[] = new byte[bufSize];
-		try (InputStream is = blobData.getBinaryStream()) {
+		try {
 			while ((length = is.read(buffer, 0, bufSize)) != -1) {
 				os.write(buffer, 0, length);
 			}
 			os.flush();
-		} catch (IOException | SQLException e) {
+		} catch (IOException e) {
 			throw new DatabaseReaderWriteToStreamException(e.getMessage(), e);
 		}
-
 	}
 
-	@Override
-	public synchronized void writeToTwoStreams(Blob blobData, OutputStream os1, FileOutputStream os2)
-			throws DatabaseReaderWriteToStreamException {
+	private void fetchDataFromResultSet(ResultSet resultSet, OutputStream osServlet, HttpServletResponse response,
+			Cache persistantCache, String idInCache, Integer width, Integer height, int quality)
+			throws SQLException, DatabaseReaderNoDataException, DatabaseReaderException {
 
-		int length;
-		int bufSize = 4096;
-		byte buffer[] = new byte[bufSize];
-		try (InputStream is = blobData.getBinaryStream();
-				FileChannel filechannel = os2.getChannel();
-				FileLock lock = filechannel.lock(0, Long.MAX_VALUE, false)) {
-			while ((length = is.read(buffer, 0, bufSize)) != -1) {
-				os1.write(buffer, 0, length);
-				os2.write(buffer, 0, length);
-			}
-			os1.flush();
-			os2.flush();
-		} catch (IOException | SQLException e) {
-			throw new DatabaseReaderWriteToStreamException(e.getMessage(), e);
-		}
-
-	}
-
-	@Override
-	public void fetchDataFromResultSet(ResultSet resultSet, OutputStream osServlet, HttpServletResponse response,
-			Cache cache, String idInCache)
-			throws SQLException, OracleDatabaseReaderException {
 		resultSet.next();
 
 		int blobSize = resultSet.getInt(DatabaseReaderParamName.bsize);
 
+		if (blobSize == 0) {
+			throw new DatabaseReaderNoDataException("ContentLength is empty. ");
+		}
+
+		// String fileName = resultSet.getString(DatabaseReaderParamName.filename);
+		// String fileExtension =
+		// resultSet.getString(DatabaseReaderParamName.extension);
 		Long lastModifiedTime = resultSet.getLong(DatabaseReaderParamName.lastModified);
-
-		String fileName = resultSet.getString(DatabaseReaderParamName.filename);
-
-		String fileExtension = resultSet.getString(DatabaseReaderParamName.extension);
-
 		String mimeType = resultSet.getString(DatabaseReaderParamName.mime);
-
 		response.setContentType(mimeType);
-		response.setContentLength(blobSize);
-		response.setHeader("Last-Modified", lastModifiedTime.toString());
+
+		Instant instant = Instant.ofEpochSecond(lastModifiedTime);
+		LocalDateTime localDateTime = LocalDateTime.ofInstant(instant, GMT);
+		response.setHeader("Last-Modified", LAST_MODIFIED_FORMATTER.format(localDateTime));
 
 		Blob blobObject = resultSet.getBlob(DatabaseReaderParamName.dataBinary);
-
-		if (ContentServlet.USE_CACHE && cache.isUp) {
+		if (ContentServlet.USE_CACHE && persistantCache.connectionIsUp()) {
 			Map<String, Object> parameters = new HashMap<>();
 			parameters.put(DatabaseReaderParamName.contentType, mimeType);
 			parameters.put(DatabaseReaderParamName.type, mimeType);
 			parameters.put(DatabaseReaderParamName.size, blobSize);
 			parameters.put(DatabaseReaderParamName.hash, "someHash");
-			try (FileOutputStream cacheOs = cache.getFileOutputStream(mimeType, idInCache)) {
-				cache.putAsync(idInCache, parameters);
-				cache.writeToTwoStreams(idInCache, blobObject, osServlet, cacheOs);
 
-			} catch (IOException e) {
-				throw new OracleDatabaseReaderException(e.getMessage(), e);
+			try (OutputStream isFromCache = persistantCache.openStream(idInCache)) {
+
+				if (isFromCache != null) {
+					persistantCache.writeToTwoStreams(idInCache, blobObject, osServlet, isFromCache); // maybe better to
+																										// use
+																										// TeeOutputStream
+					persistantCache.putAsync(idInCache, parameters);
+				} else {
+					try (InputStream blobIs = blobObject.getBinaryStream()) {
+						response.setContentLengthLong(blobSize);
+						writeToStream(blobIs, osServlet);
+					}
+
+				}
+
+			} catch (IOException | DatabaseReaderWriteToStreamException e) {
+				throw new DatabaseReaderException(e.getMessage(), e);
 			}
 
 		} else {
-			try {
-				writeToStream(blobObject, osServlet);
-			} catch (DatabaseReaderWriteToStreamException e) {
-				throw new OracleDatabaseReaderException(e.getMessage(), e);
+			try (InputStream blobIs = blobObject.getBinaryStream()) {
+
+				ImageResizer resizer = ImageResizerFactory.getImageResizer();
+
+				if (width != null && height != null) {
+
+					resizer.resize(blobIs, width, height, osServlet, quality);
+				} else {
+					if (width != null) {
+						resizer.resizeByWidth(blobIs, width, osServlet, quality);
+					} else {
+						if (height != null) {
+							resizer.resizeByHeight(blobIs, height, osServlet, quality);
+						} else {
+							response.setContentLengthLong(blobSize);
+							writeToStream(blobIs, osServlet);
+						}
+					}
+				}
+			} catch (IOException | DatabaseReaderWriteToStreamException e) {
+				throw new DatabaseReaderException(e.getMessage(), e);
 			}
 		}
 

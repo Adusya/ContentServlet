@@ -2,31 +2,35 @@ package ru.unisuite.contentservlet;
 
 import java.io.OutputStream;
 import java.io.PrintWriter;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import ru.unisuite.cache.Cache;
-import ru.unisuite.cache.cacheexception.CacheGetException;
 import ru.unisuite.contentservlet.databasereader.DatabaseQueryParameters;
 import ru.unisuite.contentservlet.databasereader.DatabaseReader;
 import ru.unisuite.contentservlet.databasereader.DatabaseReaderException;
 import ru.unisuite.contentservlet.databasereader.DatabaseReaderNoDataException;
 import ru.unisuite.contentservlet.databasereader.OracleDatabaseReader;
+import ru.unisuite.scf4j.Cache;
+import ru.unisuite.scf4j.exception.SCF4JCacheGetException;
 
 public class ContentGetter {
-	
-	private final Logger logger = Logger.getLogger(ContentGetter.class.getName());
- 
-	private DatabaseReader databaseReader = new OracleDatabaseReader();
-	
+
+	public ContentGetter(ContentServletProperties properties) {
+
+		databaseReader = new OracleDatabaseReader(properties.getDatasourceName());
+		cacheControl = properties.getCacheControl();
+	}
+
+	private DatabaseReader databaseReader;
+
+	private String cacheControl;
+
 	private final static String MASK = "[^/]*[^/]";
-	
-	public static String getFileName(final String AURI) {
+
+	private static String getFileName(final String AURI) {
 		Pattern pattern = Pattern.compile(MASK);
 		Matcher matcher = pattern.matcher(AURI);
 		String rS = null;
@@ -37,61 +41,57 @@ public class ContentGetter {
 	}
 
 	public void getObject(final RequestParameters requestParameters, OutputStream os, HttpServletResponse response,
-			Cache cache) throws CacheGetException, DatabaseReaderException, DatabaseReaderNoDataException {
-		
+			Cache persistantCache)
+			throws SCF4JCacheGetException, DatabaseReaderException, DatabaseReaderNoDataException {
+
 		// Создание id объекта в кэше
 		NameCreator nameCreator = new NameCreator();
 		String idInCache = nameCreator.createWithParameters(requestParameters);
 
-		if (requestParameters.getWebMetaId() == null && requestParameters.getFileVersionId() == null
-				&& requestParameters.getClientId() == null && requestParameters.getEntryIdInPhotoalbum() == null) {
+		boolean foundInCache = ContentServlet.USE_CACHE && persistantCache.connectionIsUp()
+				&& persistantCache.exists(idInCache) && persistantCache.get(idInCache, os, response);
 
-			logger.log(Level.WARNING, "Id of requested object does not contains required parameters. ");
-			throw new IllegalArgumentException("Id of requested object does not contains required parameters. ");
+		if (foundInCache) {
+			// увеличение попаданий в кэш
+			persistantCache.increaseHits();
 
 		} else {
 
-			boolean foundInCache = ContentServlet.USE_CACHE && cache.isUp && cache.exists(idInCache)
-					&& cache.getHashById(idInCache).equals("someHash");
+			DatabaseQueryParameters queryParameters = new DatabaseQueryParameters(requestParameters.getWebMetaId(),
+					requestParameters.getWebMetaAlias(), requestParameters.getFileVersionId(),
+					requestParameters.getClientId(), requestParameters.getEntryIdInPhotoalbum(),
+					requestParameters.getWidth(), requestParameters.getHeight(), requestParameters.getQuality());
 
-			if (foundInCache) {
-				cache.get(idInCache, os, response);
-				// увеличение попаданий в кэш
-				cache.increaseHits();
+			if (queryParameters.getWebMetaId() != null || requestParameters.getWebMetaAlias() != null) {
+
+				databaseReader.getBinaryDataByMeta(queryParameters, os, response, persistantCache, idInCache);
 
 			} else {
-				
-				DatabaseQueryParameters queryParameters = new DatabaseQueryParameters(requestParameters.getWebMetaId(), requestParameters.getFileVersionId(), requestParameters.getClientId(), requestParameters.getEntryIdInPhotoalbum(), requestParameters.getWidth(), requestParameters.getHeight());
 
-				if (queryParameters.getWebMetaId() != null) {
-					
-					databaseReader.getBinaryDataByMetaId(queryParameters, os, response, cache, idInCache);
+				if (queryParameters.getFileVersionId() != null) {
+
+					databaseReader.getBinaryDataByFileVersionId(queryParameters, os, response, persistantCache,
+							idInCache);
 
 				} else {
-					
-					if (queryParameters.getFileVersionId() != null) {
 
-						databaseReader.getBinaryDataByFileVersionId(queryParameters, os, response, cache, idInCache);
+					if (queryParameters.getClientId() != null || requestParameters.getEntryIdInPhotoalbum() != null) {
 
-					} else {
+						databaseReader.getBinaryDataByClientId(queryParameters, os, response, persistantCache,
+								idInCache);
 
-						if (queryParameters.getClientId() != null || requestParameters.getEntryIdInPhotoalbum() != null) {
-
-							databaseReader.getBinaryDataByClientId(queryParameters, os, response, cache, idInCache);
-
-						}
 					}
 				}
-				
-				// увеличение промахов количество в кэш
-				if (ContentServlet.USE_CACHE && cache.isUp)
-					cache.increaseMisses();
 			}
 
+			// увеличение промахов количество в кэш
+			if (ContentServlet.USE_CACHE && persistantCache.connectionIsUp())
+				persistantCache.increaseMisses();
 		}
+
 	}
 
-	public String getHeader(final HttpServletRequest request, final Integer contentDisposition) {
+	public String getContentDisposition(final HttpServletRequest request, final Integer contentDisposition) {
 
 		String fileName = getFileName(request.getRequestURI());
 
@@ -111,22 +111,34 @@ public class ContentGetter {
 
 	}
 
+	public String getCacheControl(final boolean noCache) {
+
+		String cacheControl;
+
+		if (noCache) {
+			cacheControl = "no-cache";
+		} else {
+			cacheControl = "max-age=" + this.cacheControl;
+		}
+
+		return cacheControl;
+	}
+
 	public String getCodeData(final int WebMetaId) throws DatabaseReaderException {
 
-		String answer = null;
-
-		DatabaseReader databaseReader = new OracleDatabaseReader();
-		answer = databaseReader.getCodeData(WebMetaId);
-
-		return answer;
+		return databaseReader.getCodeData(WebMetaId);
 
 	}
 
 	public void getResTestListData(PrintWriter printWriter) throws DatabaseReaderException {
 
-		DatabaseReader databaseReader = new OracleDatabaseReader();
-
 		databaseReader.getResTestListData(printWriter);
+
+	}
+
+	public int getDefaultImageQuality() throws DatabaseReaderException, DatabaseReaderNoDataException {
+
+		return databaseReader.getDefaultImageQuality();
 
 	}
 

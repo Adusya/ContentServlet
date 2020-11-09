@@ -3,12 +3,13 @@ package ru.unisuite.contentservlet;
 class ServletParamName {
 
 	private ServletParamName() {
-		new AssertionError(ServletParamName.class.getName() + " shouldn't be initialised");
 	}
 
 	// Названия параметров из БД
 	// ID web метатермина версии контента
 	public static final String webMetaId = "id_wm";
+
+	public static final String webMetaAlias = "alias_wm";
 	/*
 	 * Content-Disposition контента 1 - attachment 2 - inline null - null
 	 */
@@ -28,6 +29,10 @@ class ServletParamName {
 	public static final String width = "SWidth";
 	// значение высоты для масштабирования изображения
 	public static final String height = "SHeight";
+	
+	public static final String quality = "quality";
+	
+	public static final String cacheControl = "no_cache";
 
 	public static final String cacheID = "id";
 
